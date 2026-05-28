@@ -1,0 +1,716 @@
+{
+  "agent_instructions": {
+    "before_start": [
+      "Прочитай этот файл и git log --oneline -20",
+      "Выбери ОДНУ задачу со статусом pending и наивысшим приоритетом",
+      "Проверь, что все dependencies этой задачи имеют статус done"
+    ],
+    "during_work": [
+      "Работай только над выбранной задачей",
+      "Делай коммиты после каждого логического изменения",
+      "Не трогай код, не связанный с текущей задачей"
+    ],
+    "before_finish": [
+      "Выполни ВСЕ test_steps из задачи",
+      "Меняй status на done ТОЛЬКО после успешного прохождения всех тестов",
+      "Напиши summary в progress.md",
+      "ЗАПРЕЩЕНО удалять или редактировать задачи — только менять status"
+    ],
+    "tdd_cycle": [
+      "RED: написать тест → запустить → убедиться что FAIL по правильной причине (ImportError/NotImplementedError, не SyntaxError)",
+      "GREEN: реализовать минимальный код → запустить → убедиться что PASS",
+      "REFACTOR: упростить код → запустить → убедиться что всё ещё PASS"
+    ]
+  },
+  "architecture_notes": {
+    "layout": "src/payment_api/ — единый пакет, два entrypoint: run-api (FastAPI) и run-worker (FastStream consumer)",
+    "naming": "Колонка metadata в Payment называется payment_metadata — избегаем коллизии с SQLAlchemy Base.metadata",
+    "expire_on_commit": "async_sessionmaker создаётся с expire_on_commit=False — обязательно для async SQLAlchemy",
+    "outbox_atomicity": "Payment + OutboxMessage создаются в ОДНОЙ транзакции. Публикация в RabbitMQ — отдельный поллер",
+    "outbox_poller": "asyncio.create_task в lifespan FastAPI, SELECT ... FOR UPDATE SKIP LOCKED",
+    "idempotency": "UNIQUE constraint на idempotency_key + check-before-insert (оптимизация) + catch IntegrityError (гарантия)",
+    "dlq_topology": "payments exchange (direct) → payments.new queue (x-dead-letter-exchange=payments.dlx) → payments.dlx → payments.dead",
+    "retry_tracking": "Счётчик попыток хранится в заголовках RabbitMQ сообщения (x-retry-count); backoff: 5s, 25s, 125s",
+    "api_key_comparison": "hmac.compare_digest() — constant-time, защита от timing attacks",
+    "webhook_ssrf": "Запрет приватных/loopback/link-local IP, только HTTPS, таймаут 10s, follow_redirects=False",
+    "complexity_rule": "max-complexity=7: хендлер consumer — оркестратор, каждый шаг (process, update_status, send_webhook) — отдельная функция",
+    "migrations_service": "Отдельный сервис migrate в docker-compose; api/consumer depend_on: migrate condition: service_completed_successfully",
+    "broker_sharing": "RabbitBroker инициализируется один раз в core/broker.py; declare_topology() вызывается и из FastAPI lifespan, и из FastStream worker lifespan",
+    "worker_process": "FastStream(broker) app в consumer/worker.py; docker-compose запускает тот же образ с command: run-worker",
+    "test_strategy": "Все тесты — unit с мок-зависимостями. API-тесты используют httpx.AsyncClient + app.dependency_overrides для подмены get_session на AsyncMock. Реальная БД и RabbitMQ нужны только для ручной проверки через make up."
+  },
+  "tasks": [
+    {
+      "id": "TASK-001",
+      "category": "infrastructure",
+      "priority": "critical",
+      "description": "Dev-окружение: Dockerfile (multi-stage, uv), docker-compose.yml, Makefile, pyproject.toml (uv+ruff), .env.example, alembic.ini",
+      "acceptance_criteria": [
+        "Dockerfile использует multi-stage build с uv; один образ для api и worker (CMD переопределяется в compose через command:)",
+        "docker-compose.yml содержит сервисы: postgres, rabbitmq (с management UI на порту 15672), migrate, api, consumer — у каждого healthcheck",
+        "rabbitmq healthcheck: rabbitmq-diagnostics -q ping, interval: 10s, retries: 5, start_period: 30s",
+        "postgres healthcheck: pg_isready -U $POSTGRES_USER, interval: 5s, retries: 5",
+        "Сервис migrate выполняет alembic upgrade head и завершается; api и consumer depend_on: {migrate: {condition: service_completed_successfully}}",
+        "pyproject.toml: uv managed, [tool.ruff] line-length=88, max-complexity=7, select=[E,W,F,I,N,UP,B,SIM,DJ,PLC0415,C901]",
+        ".env.example: DATABASE_URL, RABBITMQ_URL, API_KEY, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, RABBITMQ_DEFAULT_USER, RABBITMQ_DEFAULT_PASS, OUTBOX_POLL_INTERVAL, WEBHOOK_MAX_RETRIES, LOG_LEVEL",
+        "Makefile цели: up, down, migrate, logs, test, lint, shell-api, shell-worker",
+        "alembic.ini: script_location=migrations, sqlalchemy.url читается из DATABASE_URL env"
+      ],
+      "test_steps": [
+        "Шаг 1: cp .env.example .env && make up",
+        "Шаг 2: docker compose ps — postgres, rabbitmq running; migrate exited(0); api, consumer running",
+        "Шаг 3: curl http://localhost:15672 — RabbitMQ Management UI 200",
+        "Шаг 4: make lint — ruff check src/ выходит с кодом 0",
+        "Шаг 5: make down — все контейнеры остановлены без ошибок"
+      ],
+      "dependencies": [],
+      "status": "done"
+    },
+    {
+      "id": "TASK-002",
+      "category": "infrastructure",
+      "priority": "critical",
+      "description": "Скаффолдинг: структура src/payment_api/, пакеты, заглушки модулей (raise NotImplementedError), entrypoint-ы",
+      "acceptance_criteria": [
+        "Структура: src/payment_api/{api/v1/, consumer/, domain/, db/{models/,repositories/}, schemas/, core/} — все с __init__.py",
+        "Заглушки (raise NotImplementedError): core/config.py, core/security.py, core/broker.py, db/database.py, db/models/payment.py, db/models/outbox.py, db/repositories/payment.py, db/repositories/outbox.py, schemas/payment.py, api/v1/payments.py, api/router.py, consumer/worker.py, consumer/handler.py, domain/processor.py, domain/webhook.py, domain/outbox_service.py, domain/payment_service.py",
+        "[project.scripts]: run-api = 'payment_api.main:run' и run-worker = 'payment_api.consumer.worker:run'",
+        "Зависимости в pyproject.toml: fastapi[standard], sqlalchemy[asyncio], asyncpg, alembic, faststream[rabbit], pydantic-settings, httpx, uvicorn[standard]",
+        "Dev-зависимости: pytest, pytest-asyncio, anyio[trio], pytest-mock, ruff"
+      ],
+      "test_steps": [
+        "Шаг 1: uv sync — установка без ошибок",
+        "Шаг 2: uv run python -c 'import payment_api' — нет ImportError",
+        "Шаг 3: uv run ruff check src/ — нет ошибок",
+        "Шаг 4: ls src/payment_api/ — все директории присутствуют"
+      ],
+      "dependencies": ["TASK-001"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-003",
+      "category": "infrastructure",
+      "priority": "critical",
+      "description": "Конфигурация: Pydantic Settings в core/config.py, загрузка из .env, SecretStr для API_KEY",
+      "acceptance_criteria": [
+        "Класс Settings(BaseSettings): database_url (str), rabbitmq_url (str), api_key (SecretStr), outbox_poll_interval (int=5), webhook_max_retries (int=3), log_level (str='info')",
+        "model_config = SettingsConfigDict(env_file='.env', case_sensitive=False)",
+        "Синглтон get_settings() через @lru_cache",
+        "api_key хранится как SecretStr — не видна в repr/logs (только '**********')"
+      ],
+      "test_steps": [
+        "Шаг 1: uv run python -c 'from payment_api.core.config import get_settings; s = get_settings(); print(s.model_dump())' — все поля присутствуют",
+        "Шаг 2: print(str(get_settings())) — api_key не отображается в открытом виде",
+        "Шаг 3: uv run ruff check src/payment_api/core/config.py — код 0"
+      ],
+      "dependencies": ["TASK-002"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-004",
+      "category": "infrastructure",
+      "priority": "critical",
+      "description": "Async SQLAlchemy: движок, async_sessionmaker (expire_on_commit=False), Base, Depends get_session",
+      "acceptance_criteria": [
+        "db/database.py: create_async_engine с pool_pre_ping=True",
+        "async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False) — expire_on_commit=False обязателен (иначе MissingGreenlet после commit в async)",
+        "Async-генератор get_session() -> AsyncIterator[AsyncSession] для FastAPI Depends: yield session, commit/rollback в finally",
+        "DeclarativeBase (SQLAlchemy 2.0 style) экспортирован как Base"
+      ],
+      "test_steps": [
+        "Шаг 1: uv run python -c 'from payment_api.db.database import engine, get_session, Base; print(\"OK\")' — нет ошибок",
+        "Шаг 2: uv run ruff check src/payment_api/db/database.py — код 0"
+      ],
+      "dependencies": ["TASK-003"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-005",
+      "category": "functional",
+      "priority": "critical",
+      "description": "SQLAlchemy модель Payment: все поля согласно ТЗ, UNIQUE на idempotency_key, колонка payment_metadata",
+      "acceptance_criteria": [
+        "Модель Payment в db/models/payment.py, наследует Base, __tablename__ = 'payments'",
+        "Поля: id (UUID pk, default=uuid4), amount (Numeric(12,2) not null), currency (String(3) not null), description (String(500) nullable), payment_metadata (JSON nullable), status (String(20) not null, default='pending'), idempotency_key (String(255) not null, unique=True), webhook_url (String(2048) not null), created_at (DateTime(timezone=True) not null, server_default=func.now()), processed_at (DateTime(timezone=True) nullable)",
+        "Колонка называется payment_metadata (не metadata) — избегаем коллизии с SQLAlchemy Base.metadata",
+        "CheckConstraint на status: IN ('pending', 'succeeded', 'failed')"
+      ],
+      "test_steps": [
+        "Шаг 1: uv run python -c 'from payment_api.db.models.payment import Payment; print(list(Payment.__table__.columns.keys()))' — все поля присутствуют",
+        "Шаг 2: Убедиться что idempotency_key имеет unique=True",
+        "Шаг 3: uv run ruff check src/payment_api/db/models/payment.py — код 0"
+      ],
+      "dependencies": ["TASK-004"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-006",
+      "category": "functional",
+      "priority": "critical",
+      "description": "SQLAlchemy модель OutboxMessage: поля id, payload, published_at, created_at; индекс на published_at",
+      "acceptance_criteria": [
+        "Модель OutboxMessage в db/models/outbox.py, __tablename__ = 'outbox_messages'",
+        "Поля: id (UUID pk, default=uuid4), payload (JSON not null), published_at (DateTime(timezone=True) nullable), created_at (DateTime(timezone=True) not null, server_default=func.now())",
+        "Index('ix_outbox_published_at', 'published_at') — для быстрой выборки WHERE published_at IS NULL",
+        "payload содержит как минимум payment_id (str) и event_type (str)"
+      ],
+      "test_steps": [
+        "Шаг 1: uv run python -c 'from payment_api.db.models.outbox import OutboxMessage; print(list(OutboxMessage.__table__.columns.keys()))'",
+        "Шаг 2: uv run ruff check src/payment_api/db/models/outbox.py — код 0"
+      ],
+      "dependencies": ["TASK-004"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-007",
+      "category": "infrastructure",
+      "priority": "critical",
+      "description": "Alembic: env.py с async run_migrations, начальная миграция (таблицы payments и outbox_messages)",
+      "acceptance_criteria": [
+        "migrations/env.py настроен для async: использует AsyncEngine и run_sync(do_run_migrations)",
+        "env.py импортирует Base и ОБЕ модели для autogenerate (Payment, OutboxMessage)",
+        "alembic.ini: sqlalchemy.url переопределяется из DATABASE_URL env var в env.py через config.set_main_option",
+        "Начальная миграция создаёт таблицы payments и outbox_messages со всеми полями, UniqueConstraint, Index",
+        "make migrate применяет миграцию без ошибок"
+      ],
+      "test_steps": [
+        "Шаг 1: make up (только postgres)",
+        "Шаг 2: make migrate — вывод '1 migration applied' без ошибок",
+        "Шаг 3: docker compose exec postgres psql -U $POSTGRES_USER -d $POSTGRES_DB -c '\\dt' — таблицы payments, outbox_messages, alembic_version",
+        "Шаг 4: docker compose exec postgres psql -U $POSTGRES_USER -d $POSTGRES_DB -c '\\d payments' — все колонки и UNIQUE(idempotency_key)"
+      ],
+      "dependencies": ["TASK-005", "TASK-006"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-008",
+      "category": "infrastructure",
+      "priority": "critical",
+      "description": "FastStream RabbitMQ broker: core/broker.py — RabbitBroker, топология exchanges и очередей с DLQ",
+      "acceptance_criteria": [
+        "RabbitBroker(url=settings.rabbitmq_url) инициализируется в core/broker.py",
+        "Объявлены через RabbitExchange: payments (direct, durable=True), payments.dlx (direct, durable=True)",
+        "Очередь payments.new: durable=True, arguments={'x-dead-letter-exchange': 'payments.dlx', 'x-dead-letter-routing-key': 'payments.dead', 'x-message-ttl': 600000}",
+        "Очередь payments.dead: durable=True — DLQ для инспекции",
+        "Async-функция declare_topology(broker) — используется и в FastAPI lifespan, и в FastStream worker lifespan"
+      ],
+      "test_steps": [
+        "Шаг 1: make up (rabbitmq запущен)",
+        "Шаг 2: uv run python -c 'import asyncio; from payment_api.core.broker import broker, declare_topology; asyncio.run(declare_topology(broker))' — нет ошибок",
+        "Шаг 3: curl -s -u guest:guest http://localhost:15672/api/queues | python -m json.tool | grep name — payments.new и payments.dead присутствуют"
+      ],
+      "dependencies": ["TASK-003"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-026",
+      "category": "infrastructure",
+      "priority": "critical",
+      "description": "Настройка pytest: конфигурация в pyproject.toml, conftest.py с мок-фикстурами, проверка TDD-инфраструктуры",
+      "acceptance_criteria": [
+        "[tool.pytest.ini_options] в pyproject.toml: asyncio_mode='auto', testpaths=['tests'], log_cli=true",
+        "tests/__init__.py, tests/unit/__init__.py",
+        "tests/conftest.py: фикстура mock_settings возвращает Settings с тестовыми значениями (TEST_API_KEY, fake URLs)",
+        "pytest-asyncio и pytest-mock в [dependency-groups.dev]",
+        "uv run pytest --collect-only — сбор без ошибок"
+      ],
+      "test_steps": [
+        "Шаг 1: Настроить pytest в pyproject.toml, создать структуру tests/unit/",
+        "Шаг 2 [TDD SMOKE — RED]: Создать tests/unit/test_smoke.py: def test_tdd_infra(): assert False, 'TDD setup works'",
+        "Шаг 3: uv run pytest tests/unit/test_smoke.py -v — FAILED с 'TDD setup works' — инфраструктура работает",
+        "Шаг 4 [GREEN]: Изменить на assert True — PASSED",
+        "Шаг 5: Удалить tests/unit/test_smoke.py",
+        "Шаг 6: uv run ruff check tests/ — код 0"
+      ],
+      "dependencies": ["TASK-002"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-027",
+      "category": "functional",
+      "priority": "high",
+      "description": "[TDD RED] Написать unit-тесты PaymentService до реализации — ожидается FAILED",
+      "acceptance_criteria": [
+        "test_create_payment_new: новый платёж — payment_repo.create и outbox_repo.create вызваны, session.commit вызван один раз",
+        "test_create_payment_idempotent: get_by_idempotency_key возвращает existing → возвращается existing без вызова create",
+        "test_create_payment_race_condition: IntegrityError → rollback → get_by_idempotency_key → возвращает existing",
+        "Используются AsyncMock для сессии, MagicMock для репозиториев — реальная БД не нужна",
+        "Файл: tests/unit/test_payment_service.py"
+      ],
+      "test_steps": [
+        "Шаг 1: Написать tests/unit/test_payment_service.py импортируя PaymentService из domain/payment_service.py",
+        "Шаг 2 [RED]: uv run pytest tests/unit/test_payment_service.py -v — ожидается FAILED/ERROR (ImportError или NotImplementedError из заглушки)",
+        "Шаг 3: Убедиться что ошибка — ImportError/NotImplementedError, а НЕ SyntaxError в самих тестах",
+        "Шаг 4: uv run ruff check tests/unit/test_payment_service.py — код 0"
+      ],
+      "dependencies": ["TASK-026"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-028",
+      "category": "functional",
+      "priority": "high",
+      "description": "[TDD RED] Написать unit-тесты webhook-сервиса, SSRF-валидации и processor до реализации — ожидается FAILED",
+      "acceptance_criteria": [
+        "tests/unit/test_webhook.py: test_ssrf_block_loopback, test_ssrf_block_private_ip, test_ssrf_block_http_scheme, test_ssrf_allow_valid, test_webhook_success_first_attempt (mock httpx → 200 → True, sleep не вызван), test_webhook_retry_then_success (2 HTTPError затем 200 → True, sleep вызван дважды), test_webhook_all_retries_exhausted (3 ошибки → False)",
+        "tests/unit/test_processor.py: test_processor_returns_succeeded (mocker.patch('random.random', return_value=0.5) → 'succeeded'), test_processor_returns_failed (return_value=0.95 → 'failed'), test_processor_sleep_called (mocker.patch('asyncio.sleep') вызван ровно один раз с аргументом float)",
+        "В test_webhook.py mock через mocker.patch('httpx.AsyncClient') и mocker.patch('asyncio.sleep')"
+      ],
+      "test_steps": [
+        "Шаг 1: Написать tests/unit/test_webhook.py и tests/unit/test_processor.py",
+        "Шаг 2 [RED]: uv run pytest tests/unit/test_webhook.py tests/unit/test_processor.py -v — ожидается FAILED/ERROR",
+        "Шаг 3: Убедиться что ошибка — ImportError/NotImplementedError из заглушек",
+        "Шаг 4: uv run ruff check tests/unit/test_webhook.py tests/unit/test_processor.py — код 0"
+      ],
+      "dependencies": ["TASK-026"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-029",
+      "category": "security",
+      "priority": "high",
+      "description": "[TDD RED] Написать unit-тесты security и Pydantic-схем до реализации — ожидается FAILED",
+      "acceptance_criteria": [
+        "tests/unit/test_security.py: test_verify_api_key_valid (правильный ключ → нет исключения), test_verify_api_key_wrong (неверный ключ → HTTPException 401), test_verify_api_key_empty (пустая строка → HTTPException 401); mock get_settings через mocker.patch",
+        "tests/unit/test_schemas.py: test_payment_create_valid, test_payment_create_negative_amount (→ ValidationError), test_payment_create_zero_amount (→ ValidationError), test_payment_create_invalid_currency (→ ValidationError), test_payment_metadata_too_large (JSON > 4096 байт → ValidationError), test_payment_create_http_webhook (http:// → ValidationError)"
+      ],
+      "test_steps": [
+        "Шаг 1: Написать tests/unit/test_security.py и tests/unit/test_schemas.py",
+        "Шаг 2 [RED]: uv run pytest tests/unit/test_security.py tests/unit/test_schemas.py -v — ожидается FAILED/ERROR",
+        "Шаг 3: Убедиться что ошибки — ImportError/NotImplementedError из заглушек",
+        "Шаг 4: uv run ruff check tests/unit/test_security.py tests/unit/test_schemas.py — код 0"
+      ],
+      "dependencies": ["TASK-026"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-009",
+      "category": "security",
+      "priority": "critical",
+      "description": "[TDD GREEN] X-API-Key аутентификация: core/security.py — FastAPI Depends, hmac.compare_digest",
+      "acceptance_criteria": [
+        "verify_api_key(x_api_key: Annotated[str, Header()], settings: Annotated[Settings, Depends(get_settings)]) в core/security.py",
+        "Сравнение через hmac.compare_digest(provided, expected) — НЕ оператор == (защита от timing attacks)",
+        "expected = settings.api_key.get_secret_value()",
+        "При неверном или отсутствующем ключе — HTTPException(status_code=401, headers={'WWW-Authenticate': 'ApiKey'})",
+        "Ключ не логируется нигде"
+      ],
+      "test_steps": [
+        "Шаг 1 [RED confirm]: uv run pytest tests/unit/test_security.py -v — FAILED (из TASK-029)",
+        "Шаг 2 [GREEN]: Реализовать core/security.py",
+        "Шаг 3: uv run pytest tests/unit/test_security.py -v — все PASSED",
+        "Шаг 4 [REFACTOR]: Проверить complexity <= 7",
+        "Шаг 5: uv run pytest tests/unit/test_security.py -v — всё ещё PASSED",
+        "Шаг 6: uv run ruff check src/payment_api/core/security.py — код 0"
+      ],
+      "dependencies": ["TASK-003", "TASK-029"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-010",
+      "category": "functional",
+      "priority": "high",
+      "description": "[TDD GREEN] Pydantic v2 схемы: PaymentCreate (запрос), PaymentResponse (ответ) в schemas/payment.py",
+      "acceptance_criteria": [
+        "PaymentCreate: amount (Decimal, gt=0, max_digits=12, decimal_places=2), currency (Literal['RUB','USD','EUR']), description (str, max_length=500, default=None), payment_metadata (dict[str, Any], default=None), webhook_url (AnyHttpUrl)",
+        "PaymentResponse: id (UUID), amount (Decimal), currency (str), description (str | None), payment_metadata (dict | None), status (str), idempotency_key (str), webhook_url (str), created_at (datetime), processed_at (datetime | None)",
+        "PaymentResponse.model_config = ConfigDict(from_attributes=True)",
+        "field_validator для payment_metadata: len(json.dumps(value)) <= 4096 байт — ValidationError если превышено",
+        "field_validator для webhook_url: вызывает validate_webhook_url из domain/webhook.py, ValueError → ValueError для Pydantic"
+      ],
+      "test_steps": [
+        "Шаг 1 [RED confirm]: uv run pytest tests/unit/test_schemas.py -v — FAILED (из TASK-029)",
+        "Шаг 2 [GREEN]: Реализовать schemas/payment.py",
+        "Шаг 3: uv run pytest tests/unit/test_schemas.py -v — все PASSED",
+        "Шаг 4 [REFACTOR]: Проверить validators, complexity <= 7",
+        "Шаг 5: uv run pytest tests/unit/test_schemas.py -v — всё ещё PASSED",
+        "Шаг 6: uv run ruff check src/payment_api/schemas/ — код 0"
+      ],
+      "dependencies": ["TASK-005", "TASK-029"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-011",
+      "category": "functional",
+      "priority": "high",
+      "description": "PaymentRepository: db/repositories/payment.py — get_by_id, get_by_idempotency_key, create, update_status",
+      "acceptance_criteria": [
+        "get_by_id(session, payment_id: UUID) -> Payment | None",
+        "get_by_idempotency_key(session, key: str) -> Payment | None",
+        "create(session, **kwargs) -> Payment — session.add(payment), НЕ делает commit",
+        "update_status(session, payment_id: UUID, status: str, processed_at: datetime) -> None",
+        "Все методы async, только ORM-запросы (select/update), никакого text() с f-строками"
+      ],
+      "test_steps": [
+        "Шаг 1 [GREEN]: Реализовать db/repositories/payment.py",
+        "Шаг 2: uv run python -c 'from payment_api.db.repositories.payment import PaymentRepository; print(\"OK\")'",
+        "Шаг 3: uv run ruff check src/payment_api/db/repositories/payment.py — код 0"
+      ],
+      "dependencies": ["TASK-005", "TASK-004"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-012",
+      "category": "functional",
+      "priority": "high",
+      "description": "OutboxRepository: db/repositories/outbox.py — create, fetch_unpublished (FOR UPDATE SKIP LOCKED), mark_published",
+      "acceptance_criteria": [
+        "create(session, payload: dict) -> OutboxMessage — session.add, НЕ делает commit",
+        "fetch_unpublished(session, limit: int = 10) -> list[OutboxMessage] — WHERE published_at IS NULL ORDER BY created_at, FOR UPDATE SKIP LOCKED, LIMIT",
+        "mark_published(session, message_id: UUID) -> None — UPDATE SET published_at=now()",
+        "with_for_update(skip_locked=True) — обязательно для параллельного запуска поллеров"
+      ],
+      "test_steps": [
+        "Шаг 1 [GREEN]: Реализовать db/repositories/outbox.py",
+        "Шаг 2: uv run python -c 'from payment_api.db.repositories.outbox import OutboxRepository; print(\"OK\")'",
+        "Шаг 3: uv run ruff check src/payment_api/db/repositories/outbox.py — код 0"
+      ],
+      "dependencies": ["TASK-006", "TASK-004"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-015",
+      "category": "functional",
+      "priority": "high",
+      "description": "[TDD GREEN] Эмулятор обработки: domain/processor.py — asyncio sleep 2-5с, 90% success / 10% fail",
+      "acceptance_criteria": [
+        "async process_payment(payment_id: UUID) -> tuple[str, datetime]",
+        "await asyncio.sleep(random.uniform(2.0, 5.0))",
+        "random.random() < 0.9 → 'succeeded', иначе → 'failed'",
+        "processed_at = datetime.now(tz=timezone.utc)",
+        "Никаких DB-обращений — чистая функция"
+      ],
+      "test_steps": [
+        "Шаг 1 [RED confirm]: uv run pytest tests/unit/test_processor.py -v — FAILED (из TASK-028)",
+        "Шаг 2 [GREEN]: Реализовать domain/processor.py",
+        "Шаг 3: uv run pytest tests/unit/test_processor.py -v — все PASSED",
+        "Шаг 4 [REFACTOR]: Проверить complexity <= 7",
+        "Шаг 5: uv run pytest tests/unit/test_processor.py -v — всё ещё PASSED",
+        "Шаг 6: uv run ruff check src/payment_api/domain/processor.py — код 0"
+      ],
+      "dependencies": ["TASK-002", "TASK-028"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-016",
+      "category": "functional",
+      "priority": "high",
+      "description": "[TDD GREEN] Webhook-сервис: domain/webhook.py — validate_webhook_url (SSRF), httpx, 3 попытки с backoff",
+      "acceptance_criteria": [
+        "validate_webhook_url(url: str) -> None — ValueError для http://, loopback (127.x/::1), private (10.x/172.16-31.x/192.168.x), link-local (169.254.x)",
+        "Резолвинг через socket.getaddrinfo(); проверка каждого IP через ipaddress.ip_address(ip).is_private / is_loopback / is_link_local",
+        "async send_webhook(url: str, payload: dict, max_retries: int = 3) -> bool",
+        "httpx.AsyncClient(timeout=10.0, follow_redirects=False)",
+        "Задержки: 5 ** attempt_number секунд (attempt 1=5s, attempt 2=25s)",
+        "2xx → True; все попытки исчерпаны → False; Cyclomatic complexity <= 7"
+      ],
+      "test_steps": [
+        "Шаг 1 [RED confirm]: uv run pytest tests/unit/test_webhook.py -v — FAILED (из TASK-028)",
+        "Шаг 2 [GREEN]: Реализовать domain/webhook.py (validate_webhook_url + send_webhook)",
+        "Шаг 3: uv run pytest tests/unit/test_webhook.py -v — все PASSED",
+        "Шаг 4 [REFACTOR]: Проверить complexity <= 7, выделить _attempt_request() если нужно",
+        "Шаг 5: uv run pytest tests/unit/test_webhook.py -v — всё ещё PASSED",
+        "Шаг 6: uv run ruff check src/payment_api/domain/webhook.py — код 0"
+      ],
+      "dependencies": ["TASK-003", "TASK-028"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-013",
+      "category": "functional",
+      "priority": "critical",
+      "description": "[TDD GREEN] PaymentService.create: идемпотентность + атомарная транзакция (Payment + OutboxMessage)",
+      "acceptance_criteria": [
+        "create(session, idempotency_key: str, data: PaymentCreate) -> Payment в domain/payment_service.py",
+        "Шаг 1: get_by_idempotency_key — если найден, вернуть без создания",
+        "Шаг 2: payment_repo.create() + outbox_repo.create() в session, ОДИН await session.commit()",
+        "OutboxMessage.payload = {'payment_id': str(payment.id), 'event_type': 'payment.created'}",
+        "При IntegrityError: rollback + get_by_idempotency_key + return existing",
+        "Cyclomatic complexity <= 7"
+      ],
+      "test_steps": [
+        "Шаг 1 [RED confirm]: uv run pytest tests/unit/test_payment_service.py -v — FAILED (из TASK-027)",
+        "Шаг 2 [GREEN]: Реализовать domain/payment_service.py",
+        "Шаг 3: uv run pytest tests/unit/test_payment_service.py -v — все PASSED",
+        "Шаг 4 [REFACTOR]: Complexity <= 7, выделить helpers при необходимости",
+        "Шаг 5: uv run pytest tests/unit/ -v — все unit-тесты PASSED",
+        "Шаг 6: uv run ruff check src/payment_api/domain/payment_service.py — код 0"
+      ],
+      "dependencies": ["TASK-011", "TASK-012", "TASK-010", "TASK-027"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-014",
+      "category": "functional",
+      "priority": "critical",
+      "description": "Outbox поллер: domain/outbox_service.py — asyncio loop, FOR UPDATE SKIP LOCKED, publish → mark_published",
+      "acceptance_criteria": [
+        "outbox_poll_loop(broker, session_factory, interval: int) -> None — бесконечный asyncio цикл",
+        "fetch_unpublished → для каждого: broker.publish(payload, queue=payments_queue) → mark_published",
+        "mark_published вызывается ПОСЛЕ успешного broker.publish",
+        "Ошибки логируются через logging.exception, не прерывают цикл",
+        "asyncio.sleep(interval) в конце каждой итерации; Cyclomatic complexity <= 7"
+      ],
+      "test_steps": [
+        "Шаг 1 [GREEN]: Реализовать domain/outbox_service.py",
+        "Шаг 2: uv run ruff check src/payment_api/domain/outbox_service.py — код 0",
+        "Шаг 3: uv run python -c 'from payment_api.domain.outbox_service import outbox_poll_loop; print(\"OK\")'"
+      ],
+      "dependencies": ["TASK-012", "TASK-008"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-023",
+      "category": "security",
+      "priority": "high",
+      "description": "SSRF-защита интегрирована в schemas: field_validator PaymentCreate.webhook_url вызывает validate_webhook_url",
+      "acceptance_criteria": [
+        "validate_webhook_url уже реализован в domain/webhook.py (TASK-016)",
+        "PaymentCreate.webhook_url: field_validator вызывает validate_webhook_url(str(v)), ValueError → ValueError для Pydantic → ValidationError → HTTP 422",
+        "Покрывается тестами test_ssrf_* из TASK-028 и test_payment_create_http_webhook из TASK-029"
+      ],
+      "test_steps": [
+        "Шаг 1 [RED confirm]: uv run pytest tests/unit/test_webhook.py::test_ssrf_block_loopback tests/unit/test_schemas.py::test_payment_create_http_webhook -v — убедиться что FAILED если не реализовано",
+        "Шаг 2 [GREEN]: Добавить field_validator в PaymentCreate вызывающий validate_webhook_url",
+        "Шаг 3: uv run pytest tests/unit/test_webhook.py tests/unit/test_schemas.py -v — все PASSED",
+        "Шаг 4: uv run ruff check src/payment_api/schemas/ src/payment_api/domain/webhook.py — код 0"
+      ],
+      "dependencies": ["TASK-016", "TASK-010"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-024",
+      "category": "security",
+      "priority": "medium",
+      "description": "[TDD GREEN] Валидация: metadata size 4KB, idempotency_key length, currency enum",
+      "acceptance_criteria": [
+        "payment_metadata field_validator: json.dumps(value) <= 4096 байт — ValidationError если превышено",
+        "currency: Literal['RUB', 'USD', 'EUR']",
+        "description: max_length=500",
+        "Idempotency-Key header в endpoint: Annotated[str, Header(min_length=1, max_length=255)]"
+      ],
+      "test_steps": [
+        "Шаг 1 [RED confirm]: uv run pytest tests/unit/test_schemas.py::test_payment_metadata_too_large tests/unit/test_schemas.py::test_payment_create_invalid_currency -v — FAILED если не реализовано",
+        "Шаг 2 [GREEN]: Добавить/уточнить validators в schemas/payment.py",
+        "Шаг 3: uv run pytest tests/unit/test_schemas.py -v — все PASSED",
+        "Шаг 4: uv run ruff check src/payment_api/schemas/ — код 0"
+      ],
+      "dependencies": ["TASK-010", "TASK-029"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-017",
+      "category": "functional",
+      "priority": "critical",
+      "description": "FastAPI app factory: main.py — lifespan (broker connect + outbox task), router подключён",
+      "acceptance_criteria": [
+        "create_app() -> FastAPI в main.py",
+        "@asynccontextmanager lifespan: await broker.connect() → declare_topology(broker) → asyncio.create_task(outbox_poll_loop(...)) → yield → task.cancel() + await → await broker.close()",
+        "api_router подключён с prefix='/api/v1'",
+        "run(): uvicorn.run('payment_api.main:create_app', factory=True, ...)",
+        "OpenAPI доступен на /docs"
+      ],
+      "test_steps": [
+        "Шаг 1 [GREEN]: Реализовать main.py и api/router.py",
+        "Шаг 2: make up",
+        "Шаг 3: curl http://localhost:8000/docs — 200 Swagger UI",
+        "Шаг 4: docker compose logs api | head -30 — нет CRITICAL/ERROR при старте",
+        "Шаг 5: uv run ruff check src/payment_api/main.py — код 0"
+      ],
+      "dependencies": ["TASK-004", "TASK-008", "TASK-014"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-030",
+      "category": "functional",
+      "priority": "high",
+      "description": "[TDD RED] Написать API unit-тесты до реализации эндпоинтов — использовать dependency_overrides + AsyncMock",
+      "acceptance_criteria": [
+        "tests/unit/test_api.py использует httpx.AsyncClient(app=create_app(), base_url='http://test')",
+        "Зависимость get_session переопределяется через app.dependency_overrides[get_session] = lambda: AsyncMock(spec=AsyncSession)",
+        "Зависимость verify_api_key переопределяется для тестов авторизации",
+        "test_create_payment_success: POST → 202, поля payment_id и status присутствуют",
+        "test_create_payment_idempotent: два POST с одинаковым Idempotency-Key → одинаковый payment_id",
+        "test_get_payment_success: GET по payment_id → 200 со всеми полями",
+        "test_get_payment_not_found: GET несуществующего UUID → 404",
+        "test_get_payment_invalid_uuid: GET 'not-a-uuid' → 422",
+        "test_auth_required_create: POST без X-API-Key → 401",
+        "test_auth_required_get: GET без X-API-Key → 401",
+        "test_create_validation_error: amount=-1 → 422"
+      ],
+      "test_steps": [
+        "Шаг 1: Написать tests/unit/test_api.py с dependency_overrides для get_session и patch PaymentService",
+        "Шаг 2 [RED]: uv run pytest tests/unit/test_api.py -v — ожидается FAILED (маршруты ещё не реализованы в TASK-018/019)",
+        "Шаг 3: Убедиться что ошибки — 404/405 (маршрут не найден), а не SyntaxError в тестах",
+        "Шаг 4: uv run ruff check tests/unit/test_api.py — код 0"
+      ],
+      "dependencies": ["TASK-026", "TASK-017"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-018",
+      "category": "functional",
+      "priority": "critical",
+      "description": "[TDD GREEN] POST /api/v1/payments — 202 Accepted, Idempotency-Key header обязателен",
+      "acceptance_criteria": [
+        "Endpoint в api/v1/payments.py, зависимости: Depends(verify_api_key), Depends(get_session)",
+        "Idempotency-Key: Annotated[str, Header(min_length=1, max_length=255)] — 422 если отсутствует",
+        "Вызывает payment_service.create(session, idempotency_key, data)",
+        "Ответ: status_code=202, тело {payment_id: str(uuid), status: str, created_at: datetime}",
+        "При повторном запросе с тем же Idempotency-Key — 202 с теми же данными"
+      ],
+      "test_steps": [
+        "Шаг 1 [RED confirm]: uv run pytest tests/unit/test_api.py::test_create_payment_success -v — FAILED (из TASK-030)",
+        "Шаг 2 [GREEN]: Реализовать POST /api/v1/payments в api/v1/payments.py",
+        "Шаг 3: uv run pytest tests/unit/test_api.py::test_create_payment_success tests/unit/test_api.py::test_create_payment_idempotent tests/unit/test_api.py::test_auth_required_create tests/unit/test_api.py::test_create_validation_error -v — все PASSED",
+        "Шаг 4 [REFACTOR]: Complexity <= 7",
+        "Шаг 5: uv run ruff check src/payment_api/api/ — код 0"
+      ],
+      "dependencies": ["TASK-013", "TASK-017", "TASK-009", "TASK-010", "TASK-030"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-019",
+      "category": "functional",
+      "priority": "high",
+      "description": "[TDD GREEN] GET /api/v1/payments/{payment_id} — получение информации о платеже",
+      "acceptance_criteria": [
+        "Endpoint в api/v1/payments.py, зависимости: Depends(verify_api_key), Depends(get_session)",
+        "payment_id — UUID (422 на невалидный формат автоматически)",
+        "Не найден — HTTPException(404, detail='Payment not found')",
+        "Ответ 200 с PaymentResponse: все поля включая payment_metadata, processed_at"
+      ],
+      "test_steps": [
+        "Шаг 1 [RED confirm]: uv run pytest tests/unit/test_api.py::test_get_payment_success -v — FAILED (из TASK-030)",
+        "Шаг 2 [GREEN]: Реализовать GET /api/v1/payments/{payment_id}",
+        "Шаг 3: uv run pytest tests/unit/test_api.py -v — все PASSED (весь набор API тестов)",
+        "Шаг 4 [REFACTOR]: Complexity <= 7",
+        "Шаг 5: uv run pytest tests/unit/ -v — все unit-тесты PASSED",
+        "Шаг 6: uv run ruff check src/payment_api/api/ — код 0"
+      ],
+      "dependencies": ["TASK-017", "TASK-011", "TASK-009", "TASK-010", "TASK-030"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-020",
+      "category": "functional",
+      "priority": "critical",
+      "description": "Consumer handler оркестратор: consumer/handler.py — @broker.subscriber, helper-функции (complexity <= 7)",
+      "acceptance_criteria": [
+        "@broker.subscriber(payments_queue, payments_exchange) в consumer/handler.py",
+        "Оркестратор handle_payment_message: _process(payment_id) → _update_status(session, ...) → _send_webhook(payment)",
+        "_process(payment_id) -> tuple[str, datetime]: вызывает processor.process_payment()",
+        "_update_status(session, payment_id, status, processed_at): payment_repo.update_status() + await session.commit()",
+        "_send_webhook(payment): payload {payment_id, status, amount, currency} → webhook.send_webhook()",
+        "Каждая вспомогательная функция <= 7 cyclomatic complexity"
+      ],
+      "test_steps": [
+        "Шаг 1 [GREEN]: Реализовать consumer/handler.py",
+        "Шаг 2: uv run ruff check src/payment_api/consumer/ — код 0 включая C901",
+        "Шаг 3: uv run python -c 'from payment_api.consumer.handler import handle_payment_message; print(\"OK\")'"
+      ],
+      "dependencies": ["TASK-015", "TASK-016", "TASK-011"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-021",
+      "category": "functional",
+      "priority": "critical",
+      "description": "Retry-логика и DLQ: x-retry-count в заголовках, 3 попытки с backoff (5s/25s/125s), nack → DLQ",
+      "acceptance_criteria": [
+        "Заголовок x-retry-count из входящего сообщения; если отсутствует — 0",
+        "При ошибке и retry_count < 3: asyncio.sleep(5 ** (retry_count + 1)) затем raise",
+        "При retry_count >= 3: nack(requeue=False) → DLQ через x-dead-letter-exchange",
+        "При отправке в DLQ: Payment.status → 'failed' если ещё 'pending'",
+        "Логирование каждой попытки с payment_id и attempt number"
+      ],
+      "test_steps": [
+        "Шаг 1 [GREEN]: Добавить retry-логику в consumer/handler.py",
+        "Шаг 2: uv run ruff check src/payment_api/consumer/ — код 0",
+        "Шаг 3: uv run python -c 'from payment_api.consumer.handler import handle_payment_message; print(\"OK\")'"
+      ],
+      "dependencies": ["TASK-020", "TASK-008"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-022",
+      "category": "functional",
+      "priority": "critical",
+      "description": "FastStream worker entrypoint: consumer/worker.py — FastStream app, lifespan с declare_topology",
+      "acceptance_criteria": [
+        "FastStream(broker) app в consumer/worker.py",
+        "on_startup: declare_topology(broker) + проверка соединения с DB",
+        "handler из consumer/handler.py регистрируется через @broker.subscriber при импорте",
+        "run() вызывает app.run()",
+        "docker-compose consumer: та же image, command: run-worker"
+      ],
+      "test_steps": [
+        "Шаг 1 [GREEN]: Реализовать consumer/worker.py",
+        "Шаг 2: make up",
+        "Шаг 3: docker compose logs consumer | head -20 — нет CRITICAL при старте",
+        "Шаг 4: uv run ruff check src/payment_api/consumer/worker.py — код 0"
+      ],
+      "dependencies": ["TASK-021", "TASK-004", "TASK-008"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-025",
+      "category": "functional",
+      "priority": "medium",
+      "description": "Обработка ошибок API: глобальный exception handler для 500, стандартизированные ответы",
+      "acceptance_criteria": [
+        "Необработанные исключения → 500 с {\"detail\": \"Internal server error\"} — стек не утекает",
+        "500 логируется с traceback через logging.exception",
+        "HTTPException сериализуется корректно (401, 404, 422)"
+      ],
+      "test_steps": [
+        "Шаг 1 [GREEN]: Добавить exception handlers в main.py",
+        "Шаг 2: uv run pytest tests/unit/test_api.py -v — все PASSED (auth/validation тесты проверяют 401/422)",
+        "Шаг 3: uv run ruff check src/payment_api/main.py — код 0"
+      ],
+      "dependencies": ["TASK-018", "TASK-019"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-033",
+      "category": "infrastructure",
+      "priority": "low",
+      "description": "Ruff compliance: финальная проверка src/ и tests/ — 0 ошибок, complexity, PLC0415",
+      "acceptance_criteria": [
+        "uv run ruff check src/ tests/ — exit code 0",
+        "uv run ruff format --check src/ tests/ — exit code 0",
+        "Ни одна функция не превышает cyclomatic complexity 7 (C901)",
+        "Нет импортов внутри функций (PLC0415)",
+        "Все файлы соответствуют isort (I)"
+      ],
+      "test_steps": [
+        "Шаг 1: uv run ruff check src/ tests/ — код 0",
+        "Шаг 2: uv run ruff format --check src/ tests/ — код 0",
+        "Шаг 3: make lint — код 0",
+        "Шаг 4: uv run pytest tests/unit/ -v — все PASSED"
+      ],
+      "dependencies": ["TASK-025", "TASK-019"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-034",
+      "category": "infrastructure",
+      "priority": "low",
+      "description": "README: инструкции запуска, архитектура Outbox + Consumer, примеры curl, таблица env-переменных",
+      "acceptance_criteria": [
+        "Раздел 'Быстрый старт': cp .env.example .env → make up → curl пример создания платежа",
+        "Раздел 'Архитектура': flow (API → DB [Payment+Outbox] → Poller → RabbitMQ → Consumer → DB+Webhook), описание DLQ",
+        "Раздел 'API Reference': POST /api/v1/payments и GET /api/v1/payments/{id} с curl примерами",
+        "Раздел 'Разработка': make lint, make test, make logs, make shell-api",
+        "Раздел 'Переменные окружения': таблица Name | Default | Description"
+      ],
+      "test_steps": [
+        "Шаг 1: Выполнить 'Быстрый старт' на чистом окружении — всё работает",
+        "Шаг 2: Все curl-команды из README выполняются без изменений",
+        "Шаг 3: Нет ссылок на несуществующие make-цели"
+      ],
+      "dependencies": ["TASK-033"],
+      "status": "pending"
+    }
+  ]
+}

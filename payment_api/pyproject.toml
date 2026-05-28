@@ -1,0 +1,72 @@
+[project]
+name = "payment-api"
+version = "0.1.0"
+description = "Async payment processing microservice (FastAPI + FastStream + outbox pattern)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]>=0.136.3",
+    "sqlalchemy[asyncio]>=2.0.50",
+    "asyncpg>=0.31.0",
+    "alembic>=1.18.4",
+    "faststream[rabbit]>=0.6.7",
+    "pydantic-settings>=2.14.1",
+    "httpx>=0.28.1",
+    "uvicorn[standard]>=0.48.0",
+]
+
+[project.scripts]
+run-api = "payment_api.main:run"
+run-worker = "payment_api.consumer.worker:run"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+    "pytest-mock>=3.15.1",
+    "ruff>=0.15.14",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/payment_api"]
+
+[tool.uv]
+# Keep the resolver honest: fail rather than silently relock in CI/Docker.
+package = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",       # pycodestyle errors
+    "W",       # pycodestyle warnings
+    "F",       # pyflakes
+    "I",       # isort
+    "N",       # pep8-naming
+    "UP",      # pyupgrade
+    "B",       # flake8-bugbear
+    "SIM",     # flake8-simplify
+    "DJ",      # flake8-django
+    "PLC0415", # imports should be at top of file
+    "C901",    # mccabe complexity
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 7
+
+[tool.ruff.lint.per-file-ignores]
+# Migrations are generated; relax naming/complexity. Tests may have long lines/asserts.
+"migrations/*" = ["E501", "N", "C901"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra -q"
