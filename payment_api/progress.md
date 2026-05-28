@@ -18,9 +18,10 @@
   - `create_async_engine(settings.database_url, pool_pre_ping=True)` — engine created at module level
   - `async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)` — private `_session_factory`
   - `Base(DeclarativeBase)` — SQLAlchemy 2.0 style declarative base
-  - `get_session() -> AsyncIterator[AsyncSession]` — async generator with `async with _session_factory() as session`, commit on success / rollback on exception
+  - `get_session() -> AsyncIterator[AsyncSession]` — async generator: commit on success, rollback on exception
+  - `get_ro_session() -> AsyncIterator[AsyncSession]` — read-only dependency, no commit/rollback, use with `Depends(get_ro_session)` for GET endpoints
+  - User removed `without_commit: bool = False` param from `get_session` in favour of the dedicated `get_ro_session` function
   - All test steps passed: import OK ✓, ruff clean ✓
-  - python-expert noted: eager engine creation at import couples import to config availability (needs `.env`). Acceptable since `.env` always exists in this project (TASK-001). Tests override `get_session` via `dependency_overrides`, so engine is never used in unit tests.
 - **Branch**: feature/TASK-004-async-sqlalchemy
 
 ---
