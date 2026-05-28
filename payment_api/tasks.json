@@ -104,7 +104,7 @@
         "Шаг 3: uv run ruff check src/payment_api/core/config.py — код 0"
       ],
       "dependencies": ["TASK-002"],
-      "status": "pending"
+      "status": "done"
     },
     {
       "id": "TASK-004",
