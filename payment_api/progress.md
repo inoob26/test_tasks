@@ -2,9 +2,11 @@
 
 ## Summary
 - Total tasks: 34
-- Done: 1
+- Done: 3 (TASK-001, TASK-002, TASK-003)
 - In progress: 0
-- Pending: 33
+- Pending: 31
+
+**Next unblocked critical tasks**: TASK-026 (pytest setup, depends only on TASK-002 ✓), TASK-004 (async SQLAlchemy, depends on TASK-003 ✓), TASK-008 (FastStream broker, depends on TASK-003 ✓)
 
 ---
 
@@ -17,6 +19,21 @@
 - **Issues encountered**: <any blockers or deviations from acceptance criteria>
 - **Commits**: <commit hash(es)>
 -->
+
+## TASK-003 — Конфигурация: Pydantic Settings в core/config.py
+- **Date**: 2026-05-28
+- **Status**: done
+- **What was done**:
+  - Implemented `Settings(BaseSettings)` with all 6 required fields: `database_url`, `rabbitmq_url`, `api_key (SecretStr)`, `outbox_poll_interval (int=5)`, `webhook_max_retries (int=3)`, `log_level (str='info')`
+  - Added `model_config = SettingsConfigDict(env_file=".env", case_sensitive=False, extra="ignore")` — `extra="ignore"` is necessary because `.env` also contains Docker-specific vars (POSTGRES_USER, POSTGRES_PASSWORD, etc.) not declared in Settings; without it pydantic-settings raises ValidationError
+  - `get_settings()` singleton via `@lru_cache` with return type `-> Settings`
+  - All 3 test steps passed: fields present ✓, `api_key=SecretStr('**********')` hidden ✓, ruff clean ✓
+  - python-expert review: implementation correct, no issues
+- **Issues encountered**: `extra="ignore"` not in original AC spec but required due to Docker vars in `.env`
+- **Branch**: feature/TASK-003-config
+- **Commits**: pending git add
+
+---
 
 ## TASK-002 — Скаффолдинг: структура src/payment_api/, заглушки модулей, entrypoint-ы
 - **Date**: 2026-05-28
