@@ -18,6 +18,20 @@
 - **Commits**: <commit hash(es)>
 -->
 
+## TASK-002 — Скаффолдинг: структура src/payment_api/, заглушки модулей, entrypoint-ы
+- **Date**: 2026-05-28
+- **Status**: done
+- **What was done**:
+  - Created full `src/payment_api/` package structure with `__init__.py` in all subpackages: `api/v1/`, `consumer/`, `core/`, `db/models/`, `db/repositories/`, `domain/`, `schemas/`
+  - Created stub modules with function/class-level `raise NotImplementedError` (not module-level, to allow imports): `core/config.py`, `core/security.py`, `core/broker.py`, `db/database.py`, `db/models/payment.py`, `db/models/outbox.py`, `db/repositories/payment.py`, `db/repositories/outbox.py`, `schemas/payment.py`, `api/v1/payments.py`, `api/router.py`, `consumer/worker.py`, `consumer/handler.py`, `domain/processor.py`, `domain/webhook.py`, `domain/outbox_service.py`, `domain/payment_service.py`, `main.py`
+  - Added `anyio[trio]>=4.9.0` to dev dependencies in pyproject.toml
+  - All test steps passed: `uv sync` ✓, `import payment_api` ✓, `ruff check src/` ✓, directory structure ✓
+- **Issues encountered**: None. Stubs use function/class-level raises (not module-level) so imports never fail — this is the correct TDD pattern.
+- **Next**: TASK-003 (Pydantic Settings в core/config.py) and TASK-026 (pytest setup) are both unblocked. TASK-026 depends only on TASK-002 and is critical priority — recommend doing it next. TASK-003 is also critical. Either can go first; TASK-026 sets up TDD infrastructure needed for TASK-027/028/029.
+- **Commits**: ea4e4fb (base), this commit
+
+---
+
 ## TASK-001 — Dev-окружение: Dockerfile, docker-compose.yml, Makefile, pyproject.toml, .env.example, alembic.ini
 - **Date**: 2026-05-28
 - **Status**: done

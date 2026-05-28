@@ -21,6 +21,7 @@ run-worker = "payment_api.consumer.worker:run"
 
 [dependency-groups]
 dev = [
+    "anyio[trio]>=4.9.0",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0",
     "pytest-mock>=3.15.1",

@@ -1,0 +1,2 @@
+class OutboxMessage:
+    raise NotImplementedError

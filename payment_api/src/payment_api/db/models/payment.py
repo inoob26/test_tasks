@@ -1,0 +1,2 @@
+class Payment:
+    raise NotImplementedError
