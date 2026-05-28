@@ -1,0 +1,2 @@
+class PaymentRepository:
+    raise NotImplementedError

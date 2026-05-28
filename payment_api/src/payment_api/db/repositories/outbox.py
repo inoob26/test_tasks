@@ -1,0 +1,2 @@
+class OutboxRepository:
+    raise NotImplementedError
