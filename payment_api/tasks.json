@@ -223,7 +223,7 @@
         "Шаг 6: uv run ruff check tests/ — код 0"
       ],
       "dependencies": ["TASK-002"],
-      "status": "pending"
+      "status": "done"
     },
     {
       "id": "TASK-027",

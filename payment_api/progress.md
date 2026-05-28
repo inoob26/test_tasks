@@ -2,11 +2,11 @@
 
 ## Summary
 - Total tasks: 34
-- Done: 3 (TASK-001, TASK-002, TASK-003)
+- Done: 4 (TASK-001, TASK-002, TASK-003, TASK-026)
 - In progress: 0
-- Pending: 31
+- Pending: 30
 
-**Next unblocked critical tasks**: TASK-026 (pytest setup, depends only on TASK-002 ✓), TASK-004 (async SQLAlchemy, depends on TASK-003 ✓), TASK-008 (FastStream broker, depends on TASK-003 ✓)
+**Next unblocked critical tasks**: TASK-004 (async SQLAlchemy, depends on TASK-003 ✓), TASK-008 (FastStream broker, depends on TASK-003 ✓), TASK-027/028/029 (TDD RED tests, depend on TASK-026 ✓)
 
 ---
 
@@ -19,6 +19,21 @@
 - **Issues encountered**: <any blockers or deviations from acceptance criteria>
 - **Commits**: <commit hash(es)>
 -->
+
+## TASK-026 — Настройка pytest: конфигурация, conftest.py, TDD-инфраструктура
+- **Date**: 2026-05-28
+- **Status**: done
+- **What was done**:
+  - Added `log_cli = true` to `[tool.pytest.ini_options]` in pyproject.toml (asyncio_mode, testpaths, pythonpath were already present)
+  - Created `tests/__init__.py` and `tests/unit/__init__.py`
+  - Created `tests/conftest.py` with `mock_settings` fixture returning `Settings` with test values (TEST_API_KEY, fake postgres/rabbitmq URLs)
+  - TDD smoke cycle: RED (`assert False`) → GREEN (`assert True`) → deleted smoke test
+  - `uv run pytest --collect-only` exits 5 (no tests collected — expected, no errors) ✓, `ruff check tests/` exits 0 ✓
+  - pytest-asyncio (1.4.0) and pytest-mock (3.15.1) already in dev dependencies ✓
+- **Issues encountered**: None
+- **Branch**: feature/TASK-026-pytest-setup
+
+---
 
 ## TASK-003 — Конфигурация: Pydantic Settings в core/config.py
 - **Date**: 2026-05-28
