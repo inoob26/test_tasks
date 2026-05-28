@@ -122,7 +122,7 @@
         "Шаг 2: uv run ruff check src/payment_api/db/database.py — код 0"
       ],
       "dependencies": ["TASK-003"],
-      "status": "pending"
+      "status": "done"
     },
     {
       "id": "TASK-005",

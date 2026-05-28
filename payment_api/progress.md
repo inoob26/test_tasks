@@ -2,11 +2,27 @@
 
 ## Summary
 - Total tasks: 34
-- Done: 4 (TASK-001, TASK-002, TASK-003, TASK-026)
+- Done: 5 (TASK-001, TASK-002, TASK-003, TASK-004, TASK-026)
 - In progress: 0
-- Pending: 30
+- Pending: 29
 
-**Next unblocked critical tasks**: TASK-004 (async SQLAlchemy, depends on TASK-003 ✓), TASK-008 (FastStream broker, depends on TASK-003 ✓), TASK-027/028/029 (TDD RED tests, depend on TASK-026 ✓)
+**Next unblocked critical tasks**: TASK-005 (Payment model, depends on TASK-004 ✓), TASK-006 (OutboxMessage model, depends on TASK-004 ✓), TASK-008 (FastStream broker, depends on TASK-003 ✓), TASK-027/028/029 (TDD RED tests, depend on TASK-026 ✓)
+
+---
+
+## TASK-004 — Async SQLAlchemy: движок, async_sessionmaker, Base, get_session
+- **Date**: 2026-05-28
+- **Status**: done
+- **What was done**:
+  - Implemented `db/database.py` with SQLAlchemy 2.0 async pattern
+  - `create_async_engine(settings.database_url, pool_pre_ping=True)` — engine created at module level
+  - `async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)` — private `_session_factory`
+  - `Base(DeclarativeBase)` — SQLAlchemy 2.0 style declarative base
+  - `get_session() -> AsyncIterator[AsyncSession]` — async generator: commit on success, rollback on exception
+  - `get_ro_session() -> AsyncIterator[AsyncSession]` — read-only dependency, no commit/rollback, use with `Depends(get_ro_session)` for GET endpoints
+  - User removed `without_commit: bool = False` param from `get_session` in favour of the dedicated `get_ro_session` function
+  - All test steps passed: import OK ✓, ruff clean ✓
+- **Branch**: feature/TASK-004-async-sqlalchemy
 
 ---
 
