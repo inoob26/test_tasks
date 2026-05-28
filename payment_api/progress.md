@@ -2,11 +2,26 @@
 
 ## Summary
 - Total tasks: 34
-- Done: 4 (TASK-001, TASK-002, TASK-003, TASK-026)
+- Done: 5 (TASK-001, TASK-002, TASK-003, TASK-004, TASK-026)
 - In progress: 0
-- Pending: 30
+- Pending: 29
 
-**Next unblocked critical tasks**: TASK-004 (async SQLAlchemy, depends on TASK-003 ✓), TASK-008 (FastStream broker, depends on TASK-003 ✓), TASK-027/028/029 (TDD RED tests, depend on TASK-026 ✓)
+**Next unblocked critical tasks**: TASK-005 (Payment model, depends on TASK-004 ✓), TASK-006 (OutboxMessage model, depends on TASK-004 ✓), TASK-008 (FastStream broker, depends on TASK-003 ✓), TASK-027/028/029 (TDD RED tests, depend on TASK-026 ✓)
+
+---
+
+## TASK-004 — Async SQLAlchemy: движок, async_sessionmaker, Base, get_session
+- **Date**: 2026-05-28
+- **Status**: done
+- **What was done**:
+  - Implemented `db/database.py` with SQLAlchemy 2.0 async pattern
+  - `create_async_engine(settings.database_url, pool_pre_ping=True)` — engine created at module level
+  - `async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)` — private `_session_factory`
+  - `Base(DeclarativeBase)` — SQLAlchemy 2.0 style declarative base
+  - `get_session() -> AsyncIterator[AsyncSession]` — async generator with `async with _session_factory() as session`, commit on success / rollback on exception
+  - All test steps passed: import OK ✓, ruff clean ✓
+  - python-expert noted: eager engine creation at import couples import to config availability (needs `.env`). Acceptable since `.env` always exists in this project (TASK-001). Tests override `get_session` via `dependency_overrides`, so engine is never used in unit tests.
+- **Branch**: feature/TASK-004-async-sqlalchemy
 
 ---
 
